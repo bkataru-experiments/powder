@@ -1,0 +1,23 @@
+[package]
+name = "powder"
+version = "0.1.0"
+edition = "2021"
+description = "A sophisticated replica of the pwd command with pretty printing"
+authors = ["bkataru"]
+license = "MIT"
+repository = "https://github.com/bkataru-experiments/powder"
+readme = "README.md"
+keywords = ["pwd", "cli", "terminal", "directory"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "powder"
+path = "src/main.rs"
+
+[[bin]]
+name = "pd"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.0", features = ["derive"] }
+colored = "2.0"
