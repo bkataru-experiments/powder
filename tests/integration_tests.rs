@@ -1,6 +1,5 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
-use std::env;
 use tempfile::tempdir;
 
 #[test]
@@ -193,4 +192,21 @@ fn test_history_persistence() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Directory History"));
+}
+
+#[test]
+fn test_compact_mode() {
+    let mut cmd = Command::cargo_bin("powder").unwrap();
+    cmd.arg("--compact")
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_compact_help_shown() {
+    let mut cmd = Command::cargo_bin("powder").unwrap();
+    cmd.arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--compact"));
 }

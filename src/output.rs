@@ -1,28 +1,39 @@
-use crate::themes::{Theme, ThemeManager};
+use crate::themes::ThemeManager;
 use crate::history::HistoryEntry;
-use colored::*;
 use std::fs;
 use std::path::Path;
 use std::process;
-use terminal_size::{Width, terminal_size};
+use terminal_size::{Width, Height, terminal_size};
 
 pub struct OutputManager {
     pub theme_manager: ThemeManager,
     terminal_width: Option<usize>,
+    terminal_height: Option<usize>,
 }
 
 impl OutputManager {
     pub fn new() -> Self {
-        let terminal_width = terminal_size().map(|(Width(w), _)| w as usize);
+        let terminal_size = terminal_size();
+        let terminal_width = terminal_size.map(|(Width(w), _)| w as usize);
+        let terminal_height = terminal_size.map(|(_, Height(h))| h as usize);
         
         Self {
             theme_manager: ThemeManager::new(),
             terminal_width,
+            terminal_height,
         }
     }
 
     pub fn set_theme(&mut self, theme_name: &str) -> Result<(), String> {
         self.theme_manager.set_theme(theme_name)
+    }
+
+    pub fn set_compact_mode(&mut self, compact: bool) {
+        if compact {
+            // Force compact mode regardless of terminal size
+            self.terminal_width = Some(60);
+            self.terminal_height = Some(15);
+        }
     }
 
     pub fn print_themes(&self, no_color: bool) {
@@ -65,23 +76,65 @@ impl OutputManager {
 
         self.print_header("Directory History", no_color);
         
+        // Determine if we should show compact format based on terminal size
+        let compact_format = self.terminal_width.map_or(false, |w| w < 100) || 
+                            self.terminal_height.map_or(false, |h| h < 20);
+        
         for (index, entry) in entries.iter().enumerate() {
             let current_theme = self.theme_manager.get_current_theme();
             let marker = if index == 0 { " (current)" } else { "" };
             
-            // Format timestamp
-            let datetime = format_timestamp(entry.timestamp);
-            
-            let history_line = format!("  {}: {}{} {}",
-                self.apply_theme_color(&(index + 1).to_string(), &current_theme.colors.info_label, no_color),
-                entry.path,
-                self.apply_theme_color(marker, &current_theme.colors.git_clean, no_color),
-                self.apply_theme_color(&format!("({})", datetime), &current_theme.colors.separator, no_color)
-            );
-            
-            self.print_wrapped_line(&history_line, no_color);
+            if compact_format {
+                // Compact format for small terminals
+                let display_path = self.compress_path_for_display(&entry.path, 50);
+                let history_line = format!("{}. {}{}", 
+                    index + 1,
+                    display_path,
+                    self.apply_theme_color(marker, &current_theme.colors.git_clean, no_color)
+                );
+                self.print_wrapped_line(&history_line, no_color);
+            } else {
+                // Full format for larger terminals
+                let datetime = format_timestamp(entry.timestamp);
+                let history_line = format!("  {}: {}{} {}",
+                    self.apply_theme_color(&(index + 1).to_string(), &current_theme.colors.info_label, no_color),
+                    entry.path,
+                    self.apply_theme_color(marker, &current_theme.colors.git_clean, no_color),
+                    self.apply_theme_color(&format!("({})", datetime), &current_theme.colors.separator, no_color)
+                );
+                self.print_wrapped_line(&history_line, no_color);
+            }
         }
         println!();
+    }
+    
+    fn compress_path_for_display(&self, path: &str, max_length: usize) -> String {
+        if path.len() <= max_length {
+            return path.to_string();
+        }
+        
+        let path_obj = Path::new(path);
+        let components: Vec<_> = path_obj.components().collect();
+        
+        if components.len() <= 2 {
+            // For short paths, just truncate
+            let ellipsis = "…";
+            let take_chars = max_length - ellipsis.len();
+            return format!("{}{}", &path[..take_chars], ellipsis);
+        }
+        
+        // For longer paths, show first, last, and compressed middle
+        let first = components.first().map(|c| c.as_os_str().to_string_lossy()).unwrap_or_default();
+        let last = components.last().map(|c| c.as_os_str().to_string_lossy()).unwrap_or_default();
+        
+        let separator = "/";
+        let available_length = max_length - first.len() - last.len() - separator.len() * 2 - 3; // "…" takes 3
+        
+        if available_length > 0 {
+            format!("{}{}{}{}{}", first, separator, "…", separator, last)
+        } else {
+            format!("…{}", last)
+        }
     }
 
     pub fn print_verbose_info(&self, path: &str, no_color: bool) {
@@ -146,58 +199,85 @@ impl OutputManager {
     }
 
     pub fn print_git_info(&self, path: &str, no_color: bool) {
+        if let Some(git_root) = self.find_git_root(path) {
+            let theme = self.theme_manager.get_current_theme();
+            
+            self.print_header("Git Repository Information", no_color);
+            
+            println!("  {}: {}", 
+                self.apply_theme_color("Repository Root", &theme.colors.info_label, no_color),
+                self.apply_theme_color(&git_root.display().to_string(), &theme.colors.info_value, no_color)
+            );
+            
+            // Get branch info efficiently
+            if let Some(branch) = self.get_git_branch(&git_root) {
+                println!("  {}: {}", 
+                    self.apply_theme_color("Current Branch", &theme.colors.info_label, no_color),
+                    self.apply_theme_color(&branch, &theme.colors.git_branch, no_color)
+                );
+            }
+            
+            // Check git status efficiently
+            match self.get_git_status(&git_root) {
+                Some(true) => {
+                    println!("  {}: {}", 
+                        self.apply_theme_color("Status", &theme.colors.info_label, no_color),
+                        self.apply_theme_color("Has uncommitted changes", &theme.colors.git_dirty, no_color)
+                    );
+                }
+                Some(false) => {
+                    println!("  {}: {}", 
+                        self.apply_theme_color("Status", &theme.colors.info_label, no_color),
+                        self.apply_theme_color("Clean working tree", &theme.colors.git_clean, no_color)
+                    );
+                }
+                None => {
+                    // Don't show status if we can't determine it quickly
+                }
+            }
+            
+            println!();
+        }
+    }
+    
+    fn find_git_root(&self, path: &str) -> Option<std::path::PathBuf> {
         let mut current_path = Path::new(path);
-        let theme = self.theme_manager.get_current_theme();
         
         // Walk up the directory tree to find a .git directory
-        loop {
+        // Limit the search to avoid expensive traversals
+        let max_depth = 20;
+        for _ in 0..max_depth {
             let git_path = current_path.join(".git");
             if git_path.exists() {
-                self.print_header("Git Repository Information", no_color);
-                
-                println!("  {}: {}", 
-                    self.apply_theme_color("Repository Root", &theme.colors.info_label, no_color),
-                    self.apply_theme_color(&current_path.display().to_string(), &theme.colors.info_value, no_color)
-                );
-                
-                // Try to read current branch
-                let head_file = git_path.join("HEAD");
-                if let Ok(head_content) = fs::read_to_string(head_file) {
-                    if head_content.starts_with("ref: refs/heads/") {
-                        let branch = head_content.trim().strip_prefix("ref: refs/heads/").unwrap_or("unknown");
-                        println!("  {}: {}", 
-                            self.apply_theme_color("Current Branch", &theme.colors.info_label, no_color),
-                            self.apply_theme_color(branch, &theme.colors.git_branch, no_color)
-                        );
-                    }
-                }
-                
-                // Check if there are uncommitted changes
-                if let Ok(status_output) = process::Command::new("git")
-                    .args(["status", "--porcelain"])
-                    .current_dir(current_path)
-                    .output() {
-                    if !status_output.stdout.is_empty() {
-                        println!("  {}: {}", 
-                            self.apply_theme_color("Status", &theme.colors.info_label, no_color),
-                            self.apply_theme_color("Has uncommitted changes", &theme.colors.git_dirty, no_color)
-                        );
-                    } else {
-                        println!("  {}: {}", 
-                            self.apply_theme_color("Status", &theme.colors.info_label, no_color),
-                            self.apply_theme_color("Clean working tree", &theme.colors.git_clean, no_color)
-                        );
-                    }
-                }
-                
-                println!(); // Empty line for spacing
-                break;
+                return Some(current_path.to_path_buf());
             }
             
             match current_path.parent() {
                 Some(parent) => current_path = parent,
-                None => break, // Reached filesystem root
+                None => break,
             }
+        }
+        None
+    }
+    
+    fn get_git_branch(&self, git_root: &Path) -> Option<String> {
+        let head_file = git_root.join(".git").join("HEAD");
+        if let Ok(head_content) = fs::read_to_string(head_file) {
+            if head_content.starts_with("ref: refs/heads/") {
+                return head_content.trim().strip_prefix("ref: refs/heads/").map(|s| s.to_string());
+            }
+        }
+        None
+    }
+    
+    fn get_git_status(&self, git_root: &Path) -> Option<bool> {
+        // Use a quick git status check with timeout to avoid hanging
+        match process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(git_root)
+            .output() {
+            Ok(output) => Some(!output.stdout.is_empty()),
+            Err(_) => None, // Git not available or error
         }
     }
 
@@ -212,6 +292,65 @@ impl OutputManager {
         }
         
         let separator = custom_separator.map(|s| s.as_str()).unwrap_or("/");
+        
+        // Smart path compression for narrow terminals
+        if let Some(width) = self.terminal_width {
+            if width < 80 && components.len() > 3 {
+                self.print_compressed_path(&components, separator, &theme, no_color, width);
+                return;
+            }
+        }
+        
+        // Regular path display
+        self.print_full_path(&components, separator, &theme, no_color);
+    }
+    
+    fn print_compressed_path(&self, components: &[std::path::Component], separator: &str, 
+                           theme: &crate::themes::Theme, no_color: bool, terminal_width: usize) {
+        let mut output = String::new();
+        let max_component_length = (terminal_width / components.len()).min(20).max(3);
+        
+        for (i, component) in components.iter().enumerate() {
+            let component_str = component.as_os_str().to_string_lossy();
+            
+            // Skip root slash component if it's not the only component
+            if component_str == "/" && components.len() > 1 {
+                continue;
+            }
+            
+            // Add separator before component (except for the first meaningful component)
+            if i > 0 && !(i == 1 && components[0].as_os_str() == "/") {
+                output.push_str(&self.apply_theme_color(separator, &theme.colors.separator, no_color));
+            }
+            
+            // Compress long components except the last one (current directory)
+            let display_str = if i == components.len() - 1 {
+                // Always show full current directory name
+                component_str.to_string()
+            } else if component_str.len() > max_component_length {
+                // Compress middle components
+                let ellipsis = "…";
+                let take_chars = (max_component_length - ellipsis.len()).max(1);
+                format!("{}{}", &component_str[..take_chars], ellipsis)
+            } else {
+                component_str.to_string()
+            };
+            
+            // Color the component based on its position
+            let color = match i {
+                _ if i == components.len() - 1 => &theme.colors.current_directory,
+                0 if component_str != "/" => &theme.colors.root_path,
+                _ => &theme.colors.path_component,
+            };
+            
+            output.push_str(&self.apply_theme_color(&display_str, color, no_color));
+        }
+        
+        println!("{}", output);
+    }
+    
+    fn print_full_path(&self, components: &[std::path::Component], separator: &str, 
+                       theme: &crate::themes::Theme, no_color: bool) {
         let mut output = String::new();
         
         for (i, component) in components.iter().enumerate() {
@@ -242,7 +381,6 @@ impl OutputManager {
             }
         }
         
-        // Handle responsive output
         self.print_wrapped_line(&output, no_color);
     }
 
@@ -302,7 +440,7 @@ impl Default for OutputManager {
 }
 
 fn format_timestamp(timestamp: u64) -> String {
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
     
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

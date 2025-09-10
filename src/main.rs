@@ -4,7 +4,6 @@ mod output;
 
 use clap::{Arg, Command};
 use std::env;
-use std::path::Path;
 use std::process;
 
 use crate::history::HistoryManager;
@@ -78,6 +77,13 @@ fn main() {
                 .help("Show the past 10 working directories (most recent first)")
                 .action(clap::ArgAction::SetTrue)
         )
+        .arg(
+            Arg::new("compact")
+                .short('c')
+                .long("compact")
+                .help("Use compact output format, suitable for narrow terminals")
+                .action(clap::ArgAction::SetTrue)
+        )
         .get_matches();
 
     let use_logical = matches.get_flag("logical");
@@ -87,6 +93,7 @@ fn main() {
     let no_color = matches.get_flag("no-color");
     let list_themes = matches.get_flag("themes");
     let show_history = matches.get_flag("history");
+    let compact = matches.get_flag("compact");
     let custom_separator = matches.get_one::<String>("separator");
     let theme_name = matches.get_one::<String>("theme");
 
@@ -98,6 +105,11 @@ fn main() {
 
     // Initialize output manager
     let mut output_manager = OutputManager::new();
+    
+    // Set compact mode if specified
+    if compact {
+        output_manager.set_compact_mode(true);
+    }
     
     // Set theme if specified
     if let Some(theme) = theme_name {
@@ -154,10 +166,13 @@ fn main() {
 }
 
 fn get_current_directory(use_logical: bool, use_physical: bool) -> Result<String, String> {
+    // Performance optimization: use environment variable when possible
     if use_logical {
-        // Try to get PWD from environment first
         if let Ok(pwd) = env::var("PWD") {
-            return Ok(pwd);
+            // Quick validation that PWD actually exists and is accessible
+            if std::path::Path::new(&pwd).exists() {
+                return Ok(pwd);
+            }
         }
     }
     
@@ -165,12 +180,13 @@ fn get_current_directory(use_logical: bool, use_physical: bool) -> Result<String
     match env::current_dir() {
         Ok(path) => {
             if use_physical {
-                // Canonicalize to resolve all symlinks
+                // Only canonicalize when explicitly requested (expensive operation)
                 match path.canonicalize() {
                     Ok(canonical_path) => Ok(canonical_path.to_string_lossy().to_string()),
                     Err(e) => Err(format!("Failed to canonicalize path: {}", e)),
                 }
             } else {
+                // Fast path: just convert to string without canonicalizing
                 Ok(path.to_string_lossy().to_string())
             }
         }
